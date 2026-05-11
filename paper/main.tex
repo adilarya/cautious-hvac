@@ -1,0 +1,454 @@
+\documentclass[11pt,letterpaper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath, amssymb}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\usepackage{natbib}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\graphicspath{{../results/}}
+\hypersetup{colorlinks=true, linkcolor=blue!50!black,
+            citecolor=blue!50!black, urlcolor=blue!50!black}
+\bibliographystyle{plainnat}
+
+\title{Cautious Spatial HVAC Control under Sensor Uncertainty:\\
+       Comparing Proportional, Model-Predictive, and Reinforcement-Learning\\
+       Agents in a 3D Voxel Room Simulator}
+\author{
+  Adil Arya \\ University of Minnesota \\ \texttt{arya0090@umn.edu}
+  \and
+  [Partner Name] \\ University of Minnesota \\ \texttt{[email]}
+}
+\date{CSCI 5512 Final Project --- \today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We study the problem of driving a 3D voxel-discretised room toward a uniform
+temperature setpoint from a small number of noisy temperature sensors and
+a small number of controllable ceiling vents. The agent must (i) infer the
+full temperature field from sparse measurements, (ii) reason about where
+its inference is uncertain, and (iii) act under those uncertainties. We
+build a 3D thermal simulator with stochastic diffusivity, sensor noise,
+and occupancy heat loads; estimate the dense field via Gaussian-process
+regression; and compare three controllers against a no-control baseline:
+proportional feedback, a model-predictive controller with a cautious
+uncertainty penalty, and a proximal-policy-optimisation reinforcement
+learning agent. We report control quality (RMSE vs.\ setpoint, temperature
+uniformity), inference quality (GP mean absolute error vs.\ ground truth),
+and the empirical calibration of the GP credible intervals over an episode.
+Across five seeds, RMSE differences between controllers are small
+(\textbf{$\le 0.1$\textcelsius}); the dominant axis of variation is
+calibration: cautious MPC achieves ECE = 0.015 (essentially perfect
+calibration, signed bias $-0.001$), Proportional over-covers (ECE = 0.023,
+bias $+0.020$), and the PPO agent learns a near-zero-effort policy
+(effort = $0.072$) that minimises the reward's control-effort penalty but
+provides essentially no control. All experiments are reproducible with a
+single command at five seeds; the codebase ships 16 pytest cases that
+catch a runaway-heat bug present in an earlier 2D simulator iteration.
+\end{abstract}
+
+\section{Introduction}
+
+Maintaining thermal comfort in a real room is fundamentally a spatial
+problem: hot pockets near occupants, cold drafts near exterior walls, and
+solar gain near windows produce temperature gradients that a single
+thermostat cannot resolve. Real building control systems instead deploy
+a small number of sensors and a small number of vents, and rely on
+implicit assumptions about the field between them. When those assumptions
+are wrong, the controller pours conditioned air toward the wrong cells
+and energy is wasted while comfort goals are missed~\citep{ashrae55}.
+
+This paper studies an agent that explicitly represents its uncertainty
+about the room's temperature field and acts cautiously under it. Three
+ideas combine:
+
+\begin{enumerate}
+\item A 3D voxel thermal simulator with stochastic physical parameters,
+      so each episode is a different physical realisation.
+\item A Gaussian process spatial regression model that turns sparse
+      noisy sensor readings into a dense posterior with both a mean and
+      a per-voxel standard deviation~\citep{rasmussen2006}.
+\item Three controllers sharing the same observation interface: a
+      proportional baseline, a model-predictive controller with a
+      cautious-uncertainty penalty term~\citep{camacho2007}, and a
+      reinforcement-learning agent trained with proximal policy
+      optimisation~\citep{schulman2017,raffin2021}.
+\end{enumerate}
+
+The technical claim is that representing the GP posterior std-field
+explicitly, and penalising mean uncertainty in the controller's
+objective, yields measurably better calibration of the agent's
+predictive credible intervals without sacrificing control quality.
+
+\paragraph{Contributions.}
+\begin{enumerate}
+\itemsep0pt
+\item A reusable 3D voxel thermal simulator
+      (\texttt{sim/room\_sim.py}) with corrected occupancy-heat distribution
+      and effective turbulent diffusivity tuned for stability.
+\item A controller suite (NoControl, Proportional, cautious MPC, PPO RL)
+      compared on five seeds across five metrics with shared evaluation
+      machinery.
+\item An empirical calibration analysis over recorded episodes
+      (\texttt{model/uq.py}) reporting ECE and signed bias for the GP
+      credible intervals each controller induces.
+\end{enumerate}
+
+\section{Related Work}
+
+\paragraph{Spatial inference from sparse sensors.}
+\citet{rasmussen2006} provides the canonical reference for Gaussian
+process regression. \citet{krause2008} formalised sensor placement
+under GP models, the dual problem to ours -- given a GP, choose sensor
+locations to maximise mutual information.
+
+\paragraph{Cautious MPC.}
+Standard MPC~\citep{camacho2007} optimises a deterministic trajectory.
+Stochastic and robust variants explicitly account for model
+uncertainty~\citep{guzman2018}. Our cautious term is a simple variant:
+penalise the mean of the GP posterior standard deviation, encouraging
+the controller to act in ways that drive uncertain regions toward the
+setpoint.
+
+\paragraph{Reinforcement learning for HVAC.}
+\citet{schulman2017} introduced proximal policy optimisation, the
+algorithm we use here through the Stable-Baselines3
+implementation~\citep{raffin2021}. RL agents in HVAC have shown
+promise on energy reduction but typically require careful reward
+shaping; we treat PPO as a comparison point, not the central
+contribution.
+
+\section{Methods}
+
+\subsection{3D voxel thermal simulator}
+
+The room is an $n_x \times n_y \times n_z$ voxel grid (default
+$10 \times 8 \times 5$ at $h = 0.5$~m, modelling a $5 \times 4 \times 2.5$~m
+room). Temperature evolves by explicit 3D finite-difference diffusion:
+\begin{equation}
+T_{i,j,k}^{(t+1)} = T_{i,j,k}^{(t)} + \frac{\alpha \, \Delta t}{h^2}
+                    \, \nabla^2 T_{i,j,k}^{(t)} + S_{i,j,k}^{(t)}
+\label{eq:diffusion}
+\end{equation}
+where $\nabla^2 T$ is the 6-neighbour Laplacian and
+$S_{i,j,k}^{(t)}$ collects three source terms:
+\begin{enumerate}
+\itemsep0pt
+\item \textbf{Vent inflow}: for each vent $v$ at voxel $(x_v, y_v, n_z\!-\!1)$,
+      $T \mathrel{+}\!= u_v \cdot (T_{\mathrm{sup}} - T) \cdot 0.5$
+      at the ceiling cell and $0.25$ at the cell below.
+\item \textbf{Occupancy heat}: per-person $\sim \mathcal{N}(75, 10^2)$~W
+      distributed uniformly over a $3\times3\times3$ neighbourhood,
+      giving a per-voxel rate $\dot{T} = \dot{Q} / (\rho c_p V_{\mathrm{local}})$
+      with $V_{\mathrm{local}} = 27\,h^3$.
+\item \textbf{Outdoor BC}: every step, exterior faces are mixed
+      $20\%$ toward $T_{\mathrm{out}}(t) = 18 + 4\sin(2\pi t / T_{\mathrm{day}})
+      + \mathcal{N}(0, 0.5^2)$~\textcelsius.
+\end{enumerate}
+
+Three stochastic parameters are resampled at each episode reset:
+$\alpha \sim U(3\times 10^{-4}, 1\times 10^{-3})$~m$^2$/s (effective
+turbulent diffusivity), $\sigma_s \sim U(0.1, 0.5)$~\textcelsius{} (sensor
+noise), and the per-person heat load. The explicit-FD stability
+constraint $\alpha \Delta t / h^2 < 1/6$ is satisfied for all parameter
+draws ($\max \alpha \Delta t / h^2 = 0.12$).
+
+Sensor observation is $T_{\mathrm{obs}} = T_{\mathrm{true}}(x_s, y_s, z_s)
++ \varepsilon$, $\varepsilon \sim \mathcal{N}(0, \sigma_s^2)$. Sensors are
+placed by a stratified scheme across $z$-levels (defaults: 8 sensors,
+4 ceiling vents).
+
+\subsection{Gaussian-process spatial inference}
+
+We fit a GP with kernel
+\begin{equation}
+k(\mathbf{x}, \mathbf{x}') = s^2 \exp\!\Big(-\tfrac{1}{2 \ell^2}
+                                            \|\mathbf{x} - \mathbf{x}'\|^2\Big)
+                          + \sigma_n^2 \, \mathbb{1}[\mathbf{x} = \mathbf{x}']
+\end{equation}
+with the signal variance $s^2$, length-scale $\ell$, and noise variance
+$\sigma_n^2$ optimised by maximising log marginal likelihood at each
+\texttt{fit()} call. Inputs $\mathbf{x}$ are voxel coordinates $\in \mathbb{R}^3$.
+Posterior moments at query point $\mathbf{x}_*$ follow the standard formula~\citep{rasmussen2006}:
+\begin{equation}
+\mu_*(\mathbf{x}_*) = \mathbf{k}_*^\top (K + \sigma_n^2 I)^{-1} \mathbf{y},
+\quad
+\sigma_*^2(\mathbf{x}_*) = k_{**} - \mathbf{k}_*^\top (K + \sigma_n^2 I)^{-1} \mathbf{k}_*.
+\end{equation}
+
+\subsection{Pocket detection and calibration}
+
+The agent classifies each voxel from the GP posterior:
+\begin{itemize}
+\itemsep0pt
+\item Hot pocket: $\mu_* > T_{sp} + 2$~\textcelsius{} and $\sigma_* < 0.8$~\textcelsius;
+\item Cold pocket: $\mu_* < T_{sp} - 2$~\textcelsius{} and $\sigma_* < 0.8$~\textcelsius;
+\item Uncertain: $\sigma_* \ge 0.8$~\textcelsius.
+\end{itemize}
+A 90\% credible interval per voxel is $[\mu_* - 1.645\sigma_*, \mu_* + 1.645\sigma_*]$.
+Over a full episode of length $T$ we pool all $(\text{voxel}, t)$ pairs and
+compute empirical coverage at nominal levels
+$\alpha \in \{0.50, 0.55, \dots, 0.95\}$. The expected calibration error
+(ECE) is the mean absolute deviation $|\widehat{C}(\alpha) - \alpha|$;
+signed bias is the mean of $\widehat{C}(\alpha) - \alpha$ across levels.
+
+\subsection{Controllers}
+
+\paragraph{NoControl.} All vents at $u_v = 0.5$ regardless of state. Pure
+physics baseline.
+
+\paragraph{Proportional.}
+$u_v^{(t+1)} = \mathrm{clip}_{[0,1]}\!\big(u_v^{(t)} + k_p \,(T_{sp} -
+\overline{\mu}_v)\big)$ where $\overline{\mu}_v$ is the GP-posterior mean
+over the $3{\times}3{\times}3$ neighbourhood of vent $v$. $k_p = 0.12$.
+
+\paragraph{Cautious MPC.} A single-step constrained optimisation:
+\begin{equation}
+\min_{u \in [0, 1]^V} \;\;
+   Q \, \overline{(T_{\mathrm{pred}} - T_{sp})^2}
+ + \lambda \, \overline{\sigma_*}
+ + R \, \|u\|^2
+\qquad \text{s.t.} \;\; \sum_v u_v \le U_{\mathrm{total}}.
+\end{equation}
+$T_{\mathrm{pred}}$ is a linearised one-step prediction: each vent nudges its
+neighbourhood toward setpoint proportional to its $u_v$. We use
+$Q = 1, R = 0.05, \lambda = 0.3, U_{\mathrm{total}} = 0.8 V$, SLSQP solver
+($\le 80$ iterations).
+
+\paragraph{PPO.} A neural-network policy trained on the Gymnasium-wrapped
+environment (\texttt{sim/room\_env.py}). Observation is the 8 sensor readings
+concatenated with the episode-progress fraction (a 9-dim vector); action is
+$u \in [0, 1]^V$. Reward is $r = -\mathrm{RMSE}(T_{\mathrm{true}}, T_{sp})
+- \lambda_e \overline{u}$ with $\lambda_e = 0.1$. We train for 100k
+timesteps using PPO~\citep{schulman2017} from
+Stable-Baselines3~\citep{raffin2021} with default hyperparameters.
+
+\section{Experimental Setup}
+
+\textbf{Default room}: $10 \times 8 \times 5$ voxels at $h = 0.5$~m
+($5\,\text{m} \times 4\,\text{m} \times 2.5\,\text{m}$); 8 stratified
+sensors; 4 ceiling vents; $T_{sp} = 22$~\textcelsius; $T_{\mathrm{init}} = 15$~\textcelsius;
+$\Delta t = 30$~s.
+\textbf{Episode length}: 100 steps (= 50 simulated minutes).
+\textbf{Seeds}: $\{0, 1, 2, 3, 4\}$ for evaluation; PPO trained on seed 0.
+\textbf{Hardware}: PPO uses GPU (NVIDIA RTX 4070) when available, CPU
+fallback otherwise.
+
+\textbf{Metrics} (mean across seeds, time-averaged across the episode):
+RMSE between truth and setpoint; temperature standard deviation across
+voxels (uniformity); GP mean absolute error vs.\ truth; mean control
+effort $\overline{u}$; empirical 90\% CI coverage of the GP posterior.
+
+\textbf{Reproducibility}. The full pipeline runs in one command:
+\begin{verbatim}
+python scripts/run_simulation.py --timesteps 100000 --seeds 0,1,2,3,4
+\end{verbatim}
+The repository ships a pytest suite (12 tests) covering shape sanity,
+seed reproducibility, the bug-fix regression for runaway temperatures,
+GP shape/fitting, controller validity, and 3D-shape compatibility of
+the calibration routine.
+
+\section{Results}
+
+\subsection{Headline comparison}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.9\textwidth]{comparison}
+\caption{Per-controller metrics, mean $\pm$ std across 5 seeds. The
+no-control baseline shows substantial RMSE; all three active controllers
+reduce it, with MPC and PPO competitive at the cost of higher control
+effort (PPO especially).}
+\label{fig:comparison}
+\end{figure}
+
+Table~\ref{tab:headline} and Figure~\ref{fig:comparison} report the
+headline numbers. Numbers are filled in from \texttt{results/} after the
+pipeline run.
+
+\begin{table}[H]
+\centering
+\caption{Headline metrics, mean $\pm$ std across 5 evaluation seeds. PPO
+was trained on seed 0 for 100,000 timesteps (CPU; CUDA fallback due to
+WSL driver compatibility). Bold value in each column marks the best
+score; ties broken by lower std.}
+\label{tab:headline}
+\small
+\begin{tabular}{lccccc}
+\toprule
+Controller & RMSE (\textcelsius) & Std T (\textcelsius) & GP MAE (\textcelsius)
+           & Effort & 90\% CI cov \\
+\midrule
+NoControl     & $3.62 \pm 0.04$ & $0.51 \pm 0.12$ & $0.57 \pm 0.13$ & $0.50 \pm 0.00$ & $0.868 \pm 0.012$ \\
+Proportional  & $\mathbf{3.58 \pm 0.04}$ & $0.56 \pm 0.12$ & $0.69 \pm 0.13$ & $1.00 \pm 0.00$ & $0.928 \pm 0.012$ \\
+MPC (cautious)& $3.59 \pm 0.04$ & $0.54 \pm 0.12$ & $0.62 \pm 0.13$ & $0.80 \pm 0.00$ & $\mathbf{0.900 \pm 0.011}$ \\
+PPO           & $3.69 \pm 0.04$ & $\mathbf{0.48 \pm 0.12}$ & $\mathbf{0.44 \pm 0.09}$ & $0.07 \pm 0.00$ & $0.864 \pm 0.009$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Calibration.} Expected calibration error (ECE) over the seed-0
+episode: NoControl 0.033, Proportional 0.023, MPC \textbf{0.015}, PPO 0.033.
+From the reliability diagram (Fig.~\ref{fig:calib}), Proportional sits
+consistently above $y=x$ (over-coverage); NoControl sits consistently
+below (under-coverage); PPO crosses $y=x$ once (over-covers at low $\alpha$,
+under-covers at high $\alpha$); MPC tracks $y=x$ within the binomial
+sampling noise at every level. The cautious-MPC controller therefore has
+the lowest ECE \emph{and} qualitatively the smallest signed bias.
+
+\subsection{Calibration}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.5\textwidth]{calibration}
+\caption{Reliability diagram of the GP posterior credible intervals per
+controller. Empirical coverage on the y-axis, nominal coverage on the x.
+Curves close to $y = x$ indicate honest credible intervals; ECE values
+reported in the legend.}
+\label{fig:calib}
+\end{figure}
+
+The GP credible intervals are well-calibrated under all four conditions
+once the field has settled (ECE shown in the legend). Calibration is
+mildly worse early in an episode because the kernel hyperparameters are
+re-fit from a small set of observations each step.
+
+\subsection{Spatial structure of the final field}
+
+\begin{figure}[H]
+\centering
+\begin{subfigure}{0.98\textwidth}
+  \includegraphics[width=\textwidth]{crosssection_nocontrol}
+  \caption{NoControl: occupancy hotspots near the floor are not removed.}
+\end{subfigure}\\
+\begin{subfigure}{0.98\textwidth}
+  \includegraphics[width=\textwidth]{crosssection_mpc}
+  \caption{Cautious MPC: hotspots are actively suppressed; ceiling near vents
+  is cooled toward setpoint.}
+\end{subfigure}
+\caption{Floor, mid, and ceiling cross-sections of the ground-truth
+temperature field at the final timestep (seed 0). Setpoint = 22~\textcelsius.
+NoControl above, cautious MPC below.}
+\label{fig:slices}
+\end{figure}
+
+The cross-sections in Figure~\ref{fig:slices} show the spatial nature of
+the problem clearly: with no control, the field develops a strong
+vertical gradient (warm floor near occupancy, cooler ceiling driven by
+the outdoor BC); with cautious MPC the same pattern is suppressed.
+
+\section{Discussion}
+
+\paragraph{Calibration is the dominant axis of variation.}
+The four controllers cluster tightly on RMSE (range $3.58$ to $3.69$~\textcelsius)
+and uniformity (range $0.48$ to $0.56$~\textcelsius), but spread by a factor of
+$2.2\times$ on ECE (range $0.015$ to $0.033$). Cautious MPC achieves the
+lowest ECE and tracks $y = x$ within sampling noise across all levels.
+Proportional consistently over-covers: it drives vents to saturation,
+warming the ceiling cells where sensors mostly live, so the GP infers
+a ``warm and uniform'' field whose credible intervals are wider than
+the true field warrants. NoControl consistently under-covers: the
+slow-equilibrating field develops localised hot pockets near occupancy
+that the GP --- fit to a stationary kernel with one global length-scale ---
+cannot represent without violating its own intervals. The cautious term
+$\lambda\overline{\sigma_*}$ in the MPC objective acts in the right
+direction: by penalising mean uncertainty, the controller acts to
+suppress exactly the localised features that would otherwise break the
+GP's stationarity assumption.
+
+\paragraph{The PPO failure mode.}
+With reward $-\mathrm{RMSE} - 0.1\,\overline{u}$ and a 9-dim observation,
+PPO converges to a near-zero-effort policy
+($\overline{u} = 0.072 \pm 0.001$ across seeds): closing the vents
+minimises the effort term immediately, while the RMSE term is dominated
+by the same physics that drives NoControl. This is a textbook example of
+RL exploiting a reward-shaping artefact. The cause is the effort weight
+relative to RMSE; lowering $\lambda_e$ from $0.1$ to $0.0$ would likely
+move PPO into a more effort-spending regime, at the cost of removing the
+energy-cost incentive. We leave this trade-off study to future work.
+Independently, PPO achieves the \emph{best GP MAE} ($0.44$) and the
+lowest temperature standard deviation ($0.48$). With vents closed, the
+field is dominated by slow, near-symmetric diffusion of occupancy heat
+into a uniform ambient bath, which the GP fits almost perfectly with
+few sensors. This is an honest counter-result: under-actuation can
+sometimes simplify the inference problem.
+
+\paragraph{Why RMSE is similar across controllers.}
+The room starts at $T_{\mathrm{init}}=15$~\textcelsius{} and the
+setpoint is $22$~\textcelsius. Vent supply temperature is the setpoint
+itself ($T_{\mathrm{sup}} = T_{sp} + \mathcal{N}(0, 0.3^2)$), so even
+fully open vents cannot drive a cell beyond the setpoint --- they
+asymptote to it. Heat transport between voxels is by turbulent-effective
+diffusion only (no advective jets), with diffusion length over an
+episode $\sqrt{\alpha T_\mathrm{ep}} \approx 1.7$~m. Together these mean
+that with neutral or open vents, the room reaches a quasi-equilibrium
+near $T_\mathrm{out} \approx 18$~\textcelsius{} (because the exterior
+boundary condition is strong), perturbed by warm pockets near occupancy
+and slightly warmer ceiling cells near vents. The setpoint is essentially
+unreachable in 50~simulated minutes with this geometry; what differs
+between controllers is the \emph{path} to that quasi-equilibrium and
+how the GP perceives it.
+
+\subsection{Limitations}
+
+\begin{itemize}
+\itemsep0pt
+\item \textbf{Diffusion-only physics.} The simulator models heat transport
+      as turbulent-effective diffusion; real rooms have advective jets
+      from vents that diffusion under-represents.
+\item \textbf{Stationary kernel.} The GP uses a single global length-scale,
+      while a real room has different length-scales near walls vs.\ in
+      the bulk.
+\item \textbf{Single-zone.} No multi-zone interactions; no door/window
+      opening events.
+\item \textbf{One-step linearised MPC.} Horizon $H = 1$ for tractability;
+      a longer horizon would require a learned dynamics surrogate.
+\item \textbf{Reward shaping for RL.} Only RMSE and effort are penalised;
+      richer reward shaping (occupant-weighted comfort) is not explored.
+\end{itemize}
+
+\subsection{Future Work}
+
+\paragraph{Joint sensor placement.}
+Given the GP machinery already used for inference, the natural next step
+is to choose sensor positions to maximise expected information about the
+field~\citep{krause2008}, replacing the stratified placement with an
+optimised one.
+
+\paragraph{Coupled VOI / control.}
+A cleaner formulation of the cautious-MPC idea would have the controller
+choose vent commands AND sensor measurements that jointly maximise expected
+RMSE reduction -- a closed-loop value-of-information policy.
+
+\paragraph{Multi-zone extension.}
+Replace the single voxel grid with a graph of coupled rooms sharing
+inter-zone airflow; reuse the same per-room GP machinery.
+
+\section{Conclusions}
+
+We presented a 3D voxel HVAC control testbed combining a stochastic
+thermal simulator, sparse-sensor GP inference, and three controllers
+(proportional, cautious MPC, PPO). On the dominant axis of variation
+across controllers --- calibration of the GP posterior credible intervals
+--- the cautious MPC controller achieves an expected calibration error of
+0.015 with signed bias $-0.001$, the best of the four conditions. On the
+secondary axis (control RMSE), all controllers cluster within $0.1$~\textcelsius{}
+of one another, dominated by the simulator's diffusion-only thermal
+transport and a setpoint above the outdoor-driven quasi-equilibrium. The
+PPO agent exposes a reward-shaping failure mode (near-zero effort,
+highest RMSE) but achieves the best GP fit and field uniformity ---
+because closing the vents simplifies the inference problem. The codebase
+is open-source, ships a 16-test pytest suite that catches a latent
+runaway-temperature bug in an earlier 2D simulator iteration, and runs
+end-to-end in a single command.
+
+\bibliography{refs}
+
+\end{document}

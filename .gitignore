@@ -1,0 +1,33 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual envs
+.venv/
+venv/
+
+# Helper / scratch files
+_check_env.sh
+_run.sh
+_check2.sh
+results/*.log
+
+# Training artefacts
+*.zip
+
+# Build artefacts
+build/
+dist/
+
+# LaTeX compile artefacts
+*.aux
+*.log
+*.out
+*.bbl
+*.blg
+*.toc
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+paper/*.pdf
