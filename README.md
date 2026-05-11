@@ -106,8 +106,8 @@ work.
 
 ## Authors
 
-- Adil Arya — *arya0090@umn.edu*
-- [Partner Name] — *[email]*
+- Adil Arya — *arya0033@umn.edu*
+- Mohammed Jassim Jahubar Ali — *jahub001@umn.edu*
 
 ## License
 
