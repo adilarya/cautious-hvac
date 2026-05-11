@@ -127,6 +127,57 @@ contribution.
 
 \section{Methods}
 
+Table~\ref{tab:notation} collects the symbols used throughout this section.
+Equations are then introduced with a brief gloss of what each computes;
+the goal is that a reader unfamiliar with any one ingredient (finite-difference
+diffusion, GP regression, or MPC) can follow along.
+
+\begin{table}[H]
+\centering
+\caption{Notation. Symbols are grouped by where they first appear.}
+\label{tab:notation}
+\small
+\begin{tabular}{lll}
+\toprule
+Symbol & Meaning & Units \\
+\midrule
+\multicolumn{3}{l}{\textit{Simulator (Eq.~\ref{eq:diffusion})}} \\
+$n_x, n_y, n_z$ & voxel grid dimensions & --- \\
+$h$ & voxel edge length & m \\
+$\Delta t$ & simulation timestep & s \\
+$T^{(t)}_{i,j,k}$ & temperature at voxel $(i,j,k)$, step $t$ & \textcelsius \\
+$\alpha$ & effective turbulent diffusivity & m$^2$/s \\
+$\nabla^2 T$ & 6-neighbour discrete Laplacian (3D) & \textcelsius/m$^2$ \\
+$S^{(t)}_{i,j,k}$ & source term (vent + occupancy + outdoor) & \textcelsius/step \\
+$u_v$ & damper opening of vent $v$ & $[0, 1]$ \\
+$T_\mathrm{sup}$ & vent supply air temperature & \textcelsius \\
+$T_\mathrm{sp}$ & comfort setpoint & \textcelsius \\
+$T_\mathrm{out}$ & stochastic outdoor temperature & \textcelsius \\
+$\rho, c_p$ & air density and specific heat capacity & kg/m$^3$, J/(kg$\cdot$K) \\
+$\sigma_s, \varepsilon$ & sensor noise std and sample & \textcelsius \\[2pt]
+\multicolumn{3}{l}{\textit{Gaussian process (Eqs.~\ref{eq:kernel},~\ref{eq:gppost})}} \\
+$\mathbf{x}, \mathbf{x}_*$ & sensor location and query voxel & --- \\
+$k(\mathbf{x}, \mathbf{x}')$ & covariance kernel & (\textcelsius)$^2$ \\
+$s^2, \ell$ & kernel signal variance, length-scale & (\textcelsius)$^2$, voxels \\
+$\sigma_n^2$ & GP observation-noise variance & (\textcelsius)$^2$ \\
+$K$ & $S\!\times\!S$ Gram matrix over sensors & (\textcelsius)$^2$ \\
+$\mathbf{k}_*$ & $S\!\times\!1$ kernel vector $K(\mathbf{x}_*, \mathbf{x})$ & (\textcelsius)$^2$ \\
+$\mathbf{y}$ & sensor reading vector & \textcelsius \\
+$\mu_*(\mathbf{x}_*)$ & GP posterior mean & \textcelsius \\
+$\sigma_*^2(\mathbf{x}_*)$ & GP posterior variance & (\textcelsius)$^2$ \\[2pt]
+\multicolumn{3}{l}{\textit{Controllers (Eq.~\ref{eq:mpc})}} \\
+$Q, R$ & MPC weights on tracking error and effort & --- \\
+$\lambda$ & MPC cautious-uncertainty weight & --- \\
+$U_\mathrm{total}$ & total airflow budget across all vents & --- \\
+$k_p$ & proportional-controller gain & --- \\[2pt]
+\multicolumn{3}{l}{\textit{Calibration}} \\
+$\alpha$ (here) & nominal credible-interval level & $(0, 1)$ \\
+$\widehat{C}(\alpha)$ & empirical coverage at level $\alpha$ & $[0, 1]$ \\
+ECE & expected calibration error, $\mathbb{E}_\alpha |\widehat{C}(\alpha) - \alpha|$ & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \subsection{3D voxel thermal simulator}
 
 The room is an $n_x \times n_y \times n_z$ voxel grid (default
@@ -137,8 +188,14 @@ T_{i,j,k}^{(t+1)} = T_{i,j,k}^{(t)} + \frac{\alpha \, \Delta t}{h^2}
                     \, \nabla^2 T_{i,j,k}^{(t)} + S_{i,j,k}^{(t)}
 \label{eq:diffusion}
 \end{equation}
-where $\nabla^2 T$ is the 6-neighbour Laplacian and
-$S_{i,j,k}^{(t)}$ collects three source terms:
+This is the explicit (forward-Euler) finite-difference update of the 3D
+heat equation $\partial T / \partial t = \alpha\, \nabla^2 T + S/(\rho c_p)$.
+At each step every voxel is nudged toward the average of its six axis-aligned
+neighbours; the gain on that nudge is $\alpha \Delta t / h^2$. Smaller $h$
+or larger $\Delta t$ would violate the CFL stability bound
+$\alpha \Delta t / h^2 < 1/(2D) = 1/6$; our parameter choices give a
+maximum of $0.12$, comfortably stable. $S^{(t)}_{i,j,k}$ collects three
+source terms:
 \begin{enumerate}
 \itemsep0pt
 \item \textbf{Vent inflow}: for each vent $v$ at voxel $(x_v, y_v, n_z\!-\!1)$,
@@ -172,16 +229,38 @@ We fit a GP with kernel
 k(\mathbf{x}, \mathbf{x}') = s^2 \exp\!\Big(-\tfrac{1}{2 \ell^2}
                                             \|\mathbf{x} - \mathbf{x}'\|^2\Big)
                           + \sigma_n^2 \, \mathbb{1}[\mathbf{x} = \mathbf{x}']
+\label{eq:kernel}
 \end{equation}
-with the signal variance $s^2$, length-scale $\ell$, and noise variance
-$\sigma_n^2$ optimised by maximising log marginal likelihood at each
-\texttt{fit()} call. Inputs $\mathbf{x}$ are voxel coordinates $\in \mathbb{R}^3$.
-Posterior moments at query point $\mathbf{x}_*$ follow the standard formula~\citep{rasmussen2006}:
+The squared-exponential (a.k.a.\ RBF) kernel says: two voxels are
+\emph{a priori} similar to the extent that they are close in 3D space,
+with similarity decaying like a Gaussian whose width is the length-scale
+$\ell$. $s^2$ sets the overall amplitude of plausible field variations.
+The white-noise term $\sigma_n^2$ on the diagonal accounts for the fact
+that even at a sensor's exact location our reading is not exact (sensor
+noise $\varepsilon$). All three hyperparameters
+$(s^2, \ell, \sigma_n^2)$ are optimised by maximising the log marginal
+likelihood at each \texttt{fit()} call --- standard GP practice. Inputs
+$\mathbf{x}$ are voxel coordinates $\in \mathbb{R}^3$ (rather than 2D as
+in many GP applications).
+
+Given $S$ sensor readings $\mathbf{y}$, the posterior moments at any
+query voxel $\mathbf{x}_*$ are~\citep{rasmussen2006}:
 \begin{equation}
 \mu_*(\mathbf{x}_*) = \mathbf{k}_*^\top (K + \sigma_n^2 I)^{-1} \mathbf{y},
 \quad
 \sigma_*^2(\mathbf{x}_*) = k_{**} - \mathbf{k}_*^\top (K + \sigma_n^2 I)^{-1} \mathbf{k}_*.
+\label{eq:gppost}
 \end{equation}
+Reading these: $\mu_*(\mathbf{x}_*)$ is a linear combination of the
+observed readings, with weights that depend on how strongly $\mathbf{x}_*$
+co-varies with each sensor (entries of $\mathbf{k}_*$) and how the sensors
+co-vary among themselves (the inverted Gram matrix $K + \sigma_n^2 I$).
+$\sigma_*^2(\mathbf{x}_*)$ is the prior kernel variance $k_{**} = s^2$
+minus the variance explained by the sensors --- it \emph{shrinks} where
+sensors are dense or strongly correlated with $\mathbf{x}_*$ and stays
+near $s^2$ in regions where sensors give little information about
+$\mathbf{x}_*$. This is the per-voxel uncertainty the cautious-MPC
+controller will later read from.
 
 \subsection{Pocket detection and calibration}
 
@@ -216,7 +295,19 @@ over the $3{\times}3{\times}3$ neighbourhood of vent $v$. $k_p = 0.12$.
  + \lambda \, \overline{\sigma_*}
  + R \, \|u\|^2
 \qquad \text{s.t.} \;\; \sum_v u_v \le U_{\mathrm{total}}.
+\label{eq:mpc}
 \end{equation}
+Three competing terms. The first weighted by $Q$ is the standard MPC
+tracking objective: minimise the predicted RMSE between the post-action
+field $T_\mathrm{pred}$ and the setpoint $T_\mathrm{sp}$ (the overline
+denotes the mean over all voxels). The second weighted by $\lambda$ is
+the \emph{cautious} term: penalise the mean GP posterior standard
+deviation, encouraging actions that leave the agent confident about the
+resulting field. The third weighted by $R$ penalises control effort,
+encouraging energy-frugal solutions. The hard constraint
+$\sum_v u_v \le U_\mathrm{total}$ caps total airflow --- a building's
+HVAC fan has a finite capacity. SLSQP solves this small constrained
+nonlinear program in $\le$80 iterations per timestep.
 $T_{\mathrm{pred}}$ is a linearised one-step prediction: each vent nudges its
 neighbourhood toward setpoint proportional to its $u_v$. We use
 $Q = 1, R = 0.05, \lambda = 0.3, U_{\mathrm{total}} = 0.8 V$, SLSQP solver
