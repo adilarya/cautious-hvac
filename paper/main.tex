@@ -48,15 +48,19 @@ Across five seeds, RMSE differences between controllers are small
 calibration. Pooling all (voxel, time) pairs across all five seeds, the
 expected calibration error (ECE) is \textbf{0.021 for MPC} versus 0.031
 for Proportional, 0.035 for PPO, and 0.045 for NoControl --- a $2.1\times$
-spread. The PPO agent learns a zero-effort policy
-(effort = $0.000$) under our chosen reward shape, a diagnosed
-reward-shaping failure mode rather than a fundamental RL limitation. A
-controlled ablation over the cautious-term weight $\lambda \in \{0, 0.1,
-0.3, 1.0, 3.0\}$ shows that $\lambda$ has no measurable effect on
-aggregate ECE in our effort-budgeted regime (range $< 0.001$, within
-per-seed noise): the MPC calibration advantage is driven by its
-constrained-optimisation structure rather than the proposed cautious
-term. All experiments are reproducible with a single command at five
+spread. Per-seed-paired 95\% bootstrap CIs on the differences exclude zero
+for both MPC vs.\ NoControl ($\Delta$ECE $= +0.018$, CI $[+0.010, +0.026]$)
+and MPC vs.\ Proportional ($\Delta$ECE $= +0.009$, CI $[+0.004, +0.015]$);
+Bonferroni-corrected paired $t$-tests do not reach significance at
+$n = 5$ seeds and we recommend $n \ge 15$ for definitive testing. The
+PPO agent learns a zero-effort policy (effort = $0.000$) under our
+chosen reward shape, a diagnosed reward-shaping failure mode rather
+than a fundamental RL limitation. A controlled ablation over the
+cautious-term weight $\lambda \in \{0, 0.1, 0.3, 1.0, 3.0\}$ shows that
+$\lambda$ has no measurable effect on aggregate ECE in our
+effort-budgeted regime (range $< 0.001$, within per-seed noise): the MPC
+calibration advantage is driven by its constrained-optimisation
+structure rather than the proposed cautious term. All experiments are reproducible with a single command at five
 seeds; the codebase ships 17 pytest cases including a regression test for
 a runaway-heat bug found and fixed in an earlier 2D simulator iteration.
 \end{abstract}
@@ -526,6 +530,71 @@ slightly smaller under pooling because pooling improves statistical
 efficiency, not because the controllers' true calibration profiles
 change.
 
+\subsection{Statistical significance}
+\label{sec:significance}
+
+The per-seed ECE values support a confidence-bounded but not
+Bonferroni-significant ordering. We compute paired $t$-tests on each of
+the $\binom{4}{2} = 6$ pairwise controller differences, complement them
+with 95\% percentile-bootstrap confidence intervals on the paired
+mean difference (1000 resamples), and apply Bonferroni correction
+across the six comparisons. Per-controller ECE summaries (mean $\pm$
+sample std across the five seeds):
+
+\begin{center}
+\begin{tabular}{lc}
+\toprule
+Controller & ECE (mean $\pm$ std, $n=5$ seeds) \\
+\midrule
+NoControl    & $0.0446 \pm 0.0206$ \\
+Proportional & $0.0359 \pm 0.0128$ \\
+MPC          & $\mathbf{0.0266 \pm 0.0146}$ \\
+PPO          & $0.0359 \pm 0.0071$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The pairwise statistics are reported in Tab.~\ref{tab:sig}.
+
+\begin{table}[H]
+\centering
+\caption{Pairwise per-seed ECE comparisons. Mean difference $A - B$ in
+the third column; 95\% paired bootstrap CI in the fourth; Bonferroni-corrected
+$p$-value (paired two-sided $t$, $\times 6$) in the fifth.}
+\label{tab:sig}
+\small
+\input{../results/significance}
+\end{table}
+
+\paragraph{Reading the table.}
+At the Bonferroni-corrected significance threshold ($\alpha = 0.05/6 \approx 0.0083$
+on the raw $p$, equivalently $p_\mathrm{Bonf} < 0.05$) \emph{none} of the
+six pairwise differences reach significance. With $n = 5$ seeds and the
+sample standard deviations observed here, the smallest paired effect that
+the test could have detected at $\alpha = 0.0083$ is approximately
+$0.025$ ECE units (computed from the t-critical at $\nu = 4$ d.f.);
+the MPC--NoControl difference of $0.018$ falls just below.
+
+\paragraph{Reading the CIs.}
+The 95\% bootstrap CIs are more informative at this sample size. Both
+NoControl $-$ MPC (CI $[+0.0101, +0.0258]$) and Proportional $-$ MPC
+(CI $[+0.0037, +0.0148]$) \emph{exclude zero}, indicating that the
+ordering observed in the pooled reliability diagram (Fig.~\ref{fig:calib})
+is not a sampling artifact: across these five seeds, MPC has measurably
+lower ECE than both alternatives. The MPC $-$ PPO CI
+($[-0.0215, +0.0061]$) does include zero, consistent with PPO and MPC
+producing GP-honest fields for very different reasons (MPC by acting
+deliberately on a small neighbourhood; PPO by not acting at all,
+leaving the field smooth and stationary).
+
+\paragraph{What we claim and what we do not.}
+We claim that, on the five seeds tested, MPC produces a lower per-seed
+ECE than both NoControl and Proportional, with bootstrap CIs that
+exclude zero. We do not claim Bonferroni-corrected significance at
+$n = 5$. Definitive significance testing would require $n \ge 15$,
+which we leave to future work as an inexpensive ($\sim$10 minute)
+extension of \texttt{scripts/run\_significance.py}.
+
 \subsection{Spatial structure of the final field}
 
 \begin{figure}[H]
@@ -662,6 +731,9 @@ across controllers --- calibration of the GP posterior credible intervals
 --- the cautious MPC controller achieves an expected calibration error of
 0.021 (pooled across seeds), the best of the four conditions and a
 factor of $2.1\times$ better than the worst (NoControl, ECE $= 0.045$).
+Per-seed bootstrap CIs on the paired differences exclude zero for
+MPC vs.\ NoControl and MPC vs.\ Proportional
+(Section~\ref{sec:significance}).
 On the secondary axis (control RMSE), all controllers cluster within
 $0.13$~\textcelsius{} of one another, dominated by the simulator's
 diffusion-only thermal transport and a setpoint above the outdoor-driven
