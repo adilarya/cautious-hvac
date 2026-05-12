@@ -7,7 +7,8 @@ Minnesota).
 
 ## Highlight result
 
-Across five seeds (pooled), four controllers cluster tightly on
+Across five seeds (pooled), four deployable controllers and the Oracle
+upper bound cluster tightly on
 temperature RMSE ($\le 0.13$ °C apart) and uniformity ($\le 0.08$ °C
 apart), but spread by $2.1\times$ on **calibration of the GP posterior
 credible intervals**.
@@ -51,7 +52,7 @@ project/
 │   └── metrics.py      EpisodeRecord + multi-seed runner
 ├── scripts/
 │   └── run_simulation.py  end-to-end: baselines + PPO + plots
-├── tests/              pytest suite (16 cases)
+├── tests/              pytest suite (19 cases)
 ├── paper/              LaTeX writeup (main.tex, refs.bib)
 ├── results/            generated figures and trained model (gitignored .zip)
 └── requirements.txt

@@ -38,10 +38,10 @@ full temperature field from sparse measurements, (ii) reason about where
 its inference is uncertain, and (iii) act under those uncertainties. We
 build a 3D thermal simulator with stochastic diffusivity, sensor noise,
 and occupancy heat loads; estimate the dense field via Gaussian-process
-regression; and compare three controllers against a no-control baseline:
-proportional feedback, a model-predictive controller with a cautious
-uncertainty penalty, and a proximal-policy-optimisation reinforcement
-learning agent. We report control quality (RMSE vs.\ setpoint, temperature
+regression; and compare three deployable controllers against a no-control
+baseline and an oracle upper bound: proportional feedback, a model-predictive
+controller with a cautious uncertainty penalty, and a proximal-policy-
+optimisation reinforcement learning agent. We report control quality (RMSE vs.\ setpoint, temperature
 uniformity), inference quality (GP mean absolute error vs.\ ground truth),
 and the empirical calibration of the GP credible intervals over an episode.
 Across five seeds, RMSE differences between controllers are small
@@ -70,8 +70,9 @@ density (best at $S = 8$, $\approx 5\times$ worse at $S = 4$ and
 $\approx 4\times$ worse at $S = 16$), reflecting a classic
 non-stationarity-vs-data-quantity tradeoff in the GP's stationary
 kernel. All experiments are reproducible with a single command at five
-seeds; the codebase ships 17 pytest cases including a regression test for
-a runaway-heat bug found and fixed in an earlier 2D simulator iteration.
+seeds; the codebase ships 19 pytest cases including regression tests for
+a runaway-heat bug found and fixed in an earlier 2D simulator iteration
+and for the no-op cautious-term formulation diagnosed via ablation.
 \end{abstract}
 
 \section{Introduction}
@@ -435,11 +436,13 @@ python scripts/run_simulation.py --timesteps 100000 --seeds 0,1,2,3,4
 Ablation and significance scripts are separate:
 \texttt{scripts/run\_lambda\_ablation.py},
 \texttt{scripts/run\_ppo\_reward\_sweep.py},
-\texttt{scripts/run\_significance.py}. The repository ships a 17-case
+\texttt{scripts/run\_significance.py},
+\texttt{scripts/run\_sensor\_sweep.py}. The repository ships a 19-case
 \texttt{pytest} suite covering shape sanity, seed reproducibility, the
 bug-fix regression for runaway temperatures, GP shape/fitting,
 controller validity, the regression test for the no-op cautious-term
-formulation, and 3D-shape compatibility of the calibration routine.
+formulation, the Oracle-input-invariance test, and 3D-shape compatibility
+of the calibration routine.
 
 \paragraph{Hyperparameter justification.}
 Every numerical choice in this study is one of three categories:
@@ -488,15 +491,16 @@ effort (PPO especially).}
 \end{figure}
 
 Table~\ref{tab:headline} and Figure~\ref{fig:comparison} report the
-headline numbers. Numbers are filled in from \texttt{results/} after the
-pipeline run.
+headline numbers.
 
 \begin{table}[H]
 \centering
 \caption{Headline metrics, mean $\pm$ std across 5 evaluation seeds. PPO
-was trained on seed 0 for 100,000 timesteps (CPU; CUDA fallback due to
-WSL driver compatibility). Bold value in each column marks the best
-score; ties broken by lower std.}
+was trained on seed 0 for 100,000 timesteps on an NVIDIA RTX 4070 (CUDA
+12.4). Bold value in each column marks the best score; ties broken by
+lower std. Oracle is an upper-bound controller that runs MPC on the
+ground-truth field (Sec.~\ref{sec:results-oracle}); it is not
+deployable.}
 \label{tab:headline}
 \small
 \begin{tabular}{lccccc}
@@ -527,6 +531,7 @@ shows that this advantage is driven by MPC structure, not by the
 cautious term itself.
 
 \paragraph{The Oracle bound.}
+\label{sec:results-oracle}
 We include an \textbf{Oracle} controller that runs the same MPC inner
 loop but on the \emph{ground-truth} voxel field rather than the GP
 posterior mean (see \texttt{control/controller.py:OracleController}).
@@ -945,9 +950,10 @@ the outdoor BC); with cautious MPC the same pattern is suppressed.
 \section{Discussion}
 
 \paragraph{Calibration is the dominant axis of variation.}
-The four controllers cluster tightly on RMSE (range $3.58$ to $3.70$~\textcelsius)
-and uniformity (range $0.49$ to $0.56$~\textcelsius), but spread by a factor of
-$2.1\times$ on ECE (range $0.021$ to $0.045$, pooled). MPC achieves the
+The four deployable controllers and the Oracle bound cluster tightly on
+RMSE (range $3.58$ to $3.70$~\textcelsius) and uniformity (range $0.49$
+to $0.56$~\textcelsius), but spread by a factor of $2.1\times$ on ECE
+(range $0.021$ to $0.045$, pooled). MPC achieves the
 lowest ECE and tracks $y = x$ within sampling noise across all levels.
 Proportional consistently over-covers: it drives vents to saturation
 (effort $= 1.000 \pm 0.000$), warming the ceiling cells where sensors
@@ -1134,12 +1140,13 @@ inter-zone airflow; reuse the same per-room GP machinery.
 \section{Conclusions}
 
 We presented a 3D voxel HVAC control testbed combining a stochastic
-thermal simulator, sparse-sensor GP inference, and three controllers
-(proportional, cautious MPC, PPO). On the dominant axis of variation
-across controllers --- calibration of the GP posterior credible intervals
---- the cautious MPC controller achieves an expected calibration error of
-0.021 (pooled across seeds), the best of the four conditions and a
-factor of $2.1\times$ better than the worst (NoControl, ECE $= 0.045$).
+thermal simulator, sparse-sensor GP inference, three deployable
+controllers (proportional, cautious MPC, PPO), and an Oracle upper-bound
+controller. On the dominant axis of variation across controllers ---
+calibration of the GP posterior credible intervals --- the cautious MPC
+controller achieves an expected calibration error of 0.021 (pooled
+across seeds), the best of the five conditions and a factor of
+$2.1\times$ better than the worst (NoControl, ECE $= 0.045$).
 Per-seed bootstrap CIs on the paired differences exclude zero for
 MPC vs.\ NoControl and MPC vs.\ Proportional
 (Section~\ref{sec:significance}). A sensor-count sweep
@@ -1164,7 +1171,7 @@ initialisation-dominated rather than reward-shaping-dominated: at
 seed rather than the reward weight. PPO achieves the best GP fit and
 lowest field uniformity because under-actuation simplifies the
 inference problem at the cost of control. The codebase is
-open-source, ships a 17-test pytest suite including a regression that
+open-source, ships a 19-test pytest suite including a regression that
 catches a latent runaway-temperature bug found in an earlier 2D
 simulator iteration plus a regression for the no-op cautious-term
 formulation, and runs end-to-end in a single command.
