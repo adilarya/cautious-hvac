@@ -57,6 +57,29 @@ def test_mpc_higher_lambda_runs_without_crash():
         assert np.all((cmd.flows >= 0.0) & (cmd.flows <= 1.0))
 
 
+def test_oracle_returns_valid_action():
+    """Oracle should return commands in [0,1] when called with arbitrary
+    inputs; it ignores them and reads sim.ground_truth_field() instead."""
+    from control.controller import OracleController
+    sim = RoomSimulator(seed=0); sim.reset()
+    m, s = _dummy_fields(sim, mean_val=22.0, std_val=0.4)
+    cmd = OracleController().compute_action(m, s, sim)
+    assert cmd.flows.shape == (sim.n_vents,)
+    assert np.all((cmd.flows >= 0.0) & (cmd.flows <= 1.0))
+
+
+def test_oracle_ignores_passed_mean_field():
+    """Oracle uses the truth, so its action should be identical regardless
+    of what mean/std fields are passed in."""
+    from control.controller import OracleController
+    sim = RoomSimulator(seed=0); sim.reset()
+    fake1, s1 = _dummy_fields(sim, mean_val=10.0, std_val=0.1)
+    fake2, s2 = _dummy_fields(sim, mean_val=30.0, std_val=2.0)
+    cmd1 = OracleController().compute_action(fake1, s1, sim)
+    cmd2 = OracleController().compute_action(fake2, s2, sim)
+    assert np.allclose(cmd1.flows, cmd2.flows, atol=1e-6)
+
+
 def test_mpc_lambda_affects_action_when_std_nonuniform():
     """Regression test for the no-op cautious-term bug.
 

@@ -29,7 +29,8 @@ from sim.room_sim import RoomSimulator
 from sim.room_env import RoomEnv
 from model.gp_field import GPField
 from model.uq import detect_pockets, calibration_over_episode
-from control.controller import NoControl, ProportionalCtrl, MPCController
+from control.controller import (NoControl, ProportionalCtrl, MPCController,
+                                OracleController)
 from eval.metrics import run_episode, multi_seed_run, EpisodeRecord
 
 
@@ -287,13 +288,19 @@ def main():
         lambda sim: MPCController(lam=args.lambda_unc), "MPC",
         lambda s: make_sim(s, args), GPField, seeds, args,
         store_fields=True)
+    oracle_results, oracle_recs = run_baseline(
+        lambda sim: OracleController(), "Oracle",
+        lambda s: make_sim(s, args), GPField, seeds, args,
+        store_fields=True)
 
     results = {"NoControl":    no_ctrl_results,
                "Proportional": prop_results,
-               "MPC":          mpc_results}
+               "MPC":          mpc_results,
+               "Oracle":       oracle_results}
     records = {"NoControl":    no_ctrl_recs,
                "Proportional": prop_recs,
-               "MPC":          mpc_recs}
+               "MPC":          mpc_recs,
+               "Oracle":       oracle_recs}
 
     if not args.skip_rl:
         model_path = out / f"{args.algo}_agent.zip"

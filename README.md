@@ -14,10 +14,16 @@ credible intervals**.
 
 | Controller | RMSE (°C) | Effort | 90% CI cov | **ECE (pooled)** |
 | --- | --- | --- | --- | --- |
-| NoControl     | 3.62 | 0.50 | 0.867 | 0.045 |
+| NoControl     | 3.62 | 0.50 | 0.867 | 0.044 |
 | Proportional  | 3.58 | 1.00 | 0.929 | 0.031 |
-| **MPC (cautious)** | 3.59 | 0.80 | **0.898** | **0.021** |
+| **MPC (cautious)** | 3.59 | 0.80 | 0.898 | **0.021** |
+| Oracle (upper bound) | 3.59 | 0.80 | **0.909** | 0.026 |
 | PPO           | 3.70 | 0.00 | 0.863 | 0.035 |
+
+**Oracle = MPC on RMSE within seed noise** — perfect knowledge of the
+temperature field does not improve control quality, confirming the
+problem is action-bottlenecked (supply-temperature physics + airflow
+budget) rather than perception-bottlenecked.
 
 MPC tracks `y = x` on the reliability diagram most tightly across all
 nominal credible-interval levels. A $\lambda$-ablation

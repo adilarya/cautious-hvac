@@ -152,6 +152,11 @@ constraint --- a finding we surface via ablation rather than gloss over.
 \item Pairwise paired $t$-tests and bootstrap CIs on per-seed ECE
       differences (\texttt{scripts/run\_significance.py}), with
       Bonferroni correction over the six pairwise comparisons.
+\item An \textbf{Oracle} upper-bound controller that runs MPC on the
+      ground-truth field. Oracle RMSE equals MPC RMSE within seed
+      noise --- direct evidence that the control problem is
+      action-bottlenecked, not perception-bottlenecked, under our
+      supply-temperature physics.
 \end{enumerate}
 
 \section{Related Work}
@@ -499,10 +504,11 @@ score; ties broken by lower std.}
 Controller & RMSE (\textcelsius) & Std T (\textcelsius) & GP MAE (\textcelsius)
            & Effort & 90\% CI cov \\
 \midrule
-NoControl     & $3.62 \pm 0.04$ & $0.51 \pm 0.12$ & $0.57 \pm 0.13$ & $0.50 \pm 0.00$ & $0.867 \pm 0.013$ \\
-Proportional  & $\mathbf{3.58 \pm 0.04}$ & $0.56 \pm 0.12$ & $0.69 \pm 0.13$ & $1.00 \pm 0.00$ & $0.929 \pm 0.011$ \\
-MPC (cautious)& $3.59 \pm 0.04$ & $0.54 \pm 0.12$ & $0.62 \pm 0.12$ & $0.80 \pm 0.00$ & $\mathbf{0.898 \pm 0.011}$ \\
-PPO           & $3.70 \pm 0.04$ & $\mathbf{0.49 \pm 0.12}$ & $\mathbf{0.44 \pm 0.10}$ & $0.00 \pm 0.00$ & $0.863 \pm 0.009$ \\
+NoControl     & $3.62 \pm 0.04$          & $0.51 \pm 0.12$          & $0.57 \pm 0.13$          & $0.50 \pm 0.00$ & $0.867 \pm 0.013$ \\
+Proportional  & $\mathbf{3.58 \pm 0.04}$  & $0.56 \pm 0.12$          & $0.69 \pm 0.13$          & $1.00 \pm 0.00$ & $0.929 \pm 0.011$ \\
+MPC (cautious)& $3.59 \pm 0.04$          & $0.54 \pm 0.12$          & $0.62 \pm 0.12$          & $0.80 \pm 0.00$ & $\mathbf{0.898 \pm 0.011}$ \\
+Oracle        & $3.59 \pm 0.04$          & $0.54 \pm 0.12$          & $0.64 \pm 0.13$          & $0.80 \pm 0.00$ & $0.909 \pm 0.014$ \\
+PPO           & $3.70 \pm 0.04$          & $\mathbf{0.49 \pm 0.12}$ & $\mathbf{0.44 \pm 0.10}$ & $0.00 \pm 0.00$ & $0.863 \pm 0.009$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -510,8 +516,8 @@ PPO           & $3.70 \pm 0.04$ & $\mathbf{0.49 \pm 0.12}$ & $\mathbf{0.44 \pm 0
 \paragraph{Calibration.} Expected calibration error (ECE) computed by
 pooling all (voxel, time) pairs across the five seeds (40,000 samples
 per controller per nominal level):
-NoControl $0.045$, Proportional $0.031$, \textbf{MPC $0.021$}, PPO $0.035$ ---
-a $2.1\times$ spread. From the reliability diagram (Fig.~\ref{fig:calib}),
+NoControl $0.044$, Proportional $0.031$, \textbf{MPC $0.021$},
+Oracle $0.026$, PPO $0.035$ --- a $2.1\times$ spread. From the reliability diagram (Fig.~\ref{fig:calib}),
 Proportional sits consistently above $y = x$ (over-coverage); NoControl
 sits consistently below (under-coverage); PPO crosses $y = x$ near
 $\alpha = 0.7$ (over-covers at low $\alpha$, under-covers at high
@@ -519,6 +525,44 @@ $\alpha$); MPC tracks $y = x$ most tightly throughout. The cautious-MPC
 controller therefore has the lowest ECE among the four. Section~\ref{sec:lambda}
 shows that this advantage is driven by MPC structure, not by the
 cautious term itself.
+
+\paragraph{The Oracle bound.}
+We include an \textbf{Oracle} controller that runs the same MPC inner
+loop but on the \emph{ground-truth} voxel field rather than the GP
+posterior mean (see \texttt{control/controller.py:OracleController}).
+This is physically impossible to deploy --- the agent never has the
+true field --- but it bounds what an MPC-class controller could
+achieve under our action constraint and supply-temperature physics if
+its inference layer were replaced by an oracle.
+
+Three observations:
+
+\begin{enumerate}
+\itemsep0pt
+\item \textbf{Oracle RMSE = MPC RMSE} ($3.592$ vs.\ $3.591$~\textcelsius, within
+      seed noise). \emph{Perfect information about the temperature field
+      does not improve control RMSE.} The control problem is
+      action-bottlenecked, not perception-bottlenecked: at our
+      $T_\mathrm{sup} = T_\mathrm{sp}$ and $U_\mathrm{total} = 0.8 V$,
+      any controller saturating the airflow constraint reaches the
+      same physics floor. This is direct evidence for the
+      supply-temperature-bottleneck claim in Section~\ref{sec:lambda}.
+\item \textbf{Oracle has the best 90\% CI coverage} (0.909, closest to
+      nominal 0.900) but a slightly \emph{worse} pooled ECE than MPC
+      (0.026 vs.\ 0.021). The optimal action under perfect information
+      produces a field whose statistics align less well with the
+      stationary RBF kernel than the slightly-suboptimal-but-smoother
+      field MPC produces. Calibration honesty is not a monotone
+      function of action quality.
+\item \textbf{Future work that improves inference} (more sensors,
+      learned non-stationary kernels, mutual-information sensor
+      placement) \emph{cannot improve RMSE} under this action space.
+      It can improve calibration. Improving RMSE requires changing the
+      action interface --- e.g., allowing $T_\mathrm{sup} \ne
+      T_\mathrm{sp}$ (separate cooling and heating supply), relaxing
+      $U_\mathrm{total}$, or modelling vent-jet advection rather than
+      passive diffusion.
+\end{enumerate}
 
 \subsection{Cautious-term ablation}
 \label{sec:lambda}

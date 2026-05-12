@@ -31,6 +31,43 @@ def _local_mean(field: np.ndarray, x: int, y: int, z: int) -> float:
 
 # ------------------------------------------------------------- controllers
 
+class OracleController:
+    """Upper-bound baseline: MPC with access to the ground-truth field.
+
+    Identical to MPCController in optimiser, constraints, and cost
+    function shape, except that the optimiser uses the true voxel field
+    (queried from `sim.ground_truth_field()`) as its prediction base
+    rather than the GP posterior mean. The std field passed in is
+    ignored (replaced by zeros: perfect observation).
+
+    This controller is physically impossible to deploy (the agent never
+    has the true field), but it bounds what an optimal controller could
+    do given our action-space constraints. The gap between Oracle and
+    MPC measures the cost of partial observability; the gap between
+    Oracle and the supply-temperature-imposed physics floor measures
+    the cost of the action constraint itself.
+    """
+    name = "Oracle"
+
+    def __init__(self, Q: float = 1.0, R: float = 0.05,
+                 U_total: Optional[float] = None,
+                 nudge_strength: float = 0.35):
+        # lam = 0: with perfect observation there is no posterior std
+        # to weight by, so the cautious term has nothing to do.
+        self._mpc = MPCController(Q=Q, R=R, lam=0.0,
+                                  U_total=U_total,
+                                  nudge_strength=nudge_strength)
+
+    def compute_action(self, mean_field: np.ndarray, std_field: np.ndarray,
+                       sim: "RoomSimulator") -> "VentCommands":
+        truth = sim.ground_truth_field()
+        zero_std = np.zeros_like(truth)
+        return self._mpc.compute_action(truth, zero_std, sim)
+
+    def reset(self) -> None:
+        self._mpc.reset()
+
+
 class NoControl:
     """Baseline: fixed 50% flow regardless of temperature field."""
     name = "NoControl"
