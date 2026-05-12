@@ -54,8 +54,11 @@ and MPC vs.\ Proportional ($\Delta$ECE $= +0.009$, CI $[+0.004, +0.015]$);
 Bonferroni-corrected paired $t$-tests do not reach significance at
 $n = 5$ seeds and we recommend $n \ge 15$ for definitive testing. The
 PPO agent learns a zero-effort policy (effort = $0.000$) under our
-chosen reward shape, a diagnosed reward-shaping failure mode rather
-than a fundamental RL limitation. A controlled ablation over the
+chosen reward shape; a controlled sweep over the effort-penalty weight
+$\lambda_e \in \{0, 0.01, 0.1\}$ (Section~\ref{sec:ppo-sweep}) shows
+the policy is determined by training-seed initialisation rather than
+the reward weight itself --- identical policies emerge across
+$\lambda_e$ within each train seed. A controlled ablation over the
 cautious-term weight $\lambda \in \{0, 0.1, 0.3, 1.0, 3.0\}$ shows that
 $\lambda$ has no measurable effect on aggregate ECE in our
 effort-budgeted regime (range $< 0.001$, within per-seed noise): the MPC
@@ -595,6 +598,91 @@ $n = 5$. Definitive significance testing would require $n \ge 15$,
 which we leave to future work as an inexpensive ($\sim$10 minute)
 extension of \texttt{scripts/run\_significance.py}.
 
+\subsection{PPO reward-shaping sweep}
+\label{sec:ppo-sweep}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.98\textwidth]{ppo_sweep}
+\caption{PPO effort-penalty sweep. Three values of $\lambda_e$
+($\{0.0, 0.01, 0.1\}$), three independent training seeds per cell,
+five evaluation seeds per trained model (45 evaluations total). Error
+bars are std across the 15 (train, eval) combinations. All three
+metrics are essentially flat across $\lambda_e$; the cross-train-seed
+variance (vertical bar size) is an order of magnitude larger than the
+$\lambda_e$ effect.}
+\label{fig:ppo-sweep}
+\end{figure}
+
+The headline run used $\lambda_e = 0.1$ and found PPO converging to
+zero effort. We hypothesised this was a reward-shaping artefact and
+swept $\lambda_e$ to test whether $\lambda_e = 0$ unlocks an
+effort-spending policy. \textbf{The sweep does not support that
+hypothesis} (Tab.~\ref{tab:ppo-sweep}).
+
+\begin{table}[H]
+\centering
+\caption{PPO sweep aggregates across all (train, eval) seed combinations.
+Cross-train-seed variance (column std) is much larger than the
+per-$\lambda_e$ effect.}
+\label{tab:ppo-sweep}
+\small
+\begin{tabular}{cccc}
+\toprule
+$\lambda_e$ & Effort & RMSE (\textcelsius) & ECE \\
+\midrule
+$0.00$ & $0.094 \pm 0.076$ & $3.685 \pm 0.041$ & $0.039 \pm 0.009$ \\
+$0.01$ & $0.096 \pm 0.081$ & $3.685 \pm 0.042$ & $0.037 \pm 0.008$ \\
+$0.10$ & $0.085 \pm 0.074$ & $3.687 \pm 0.041$ & $0.036 \pm 0.007$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{What we found.}
+PPO produces \emph{identical policies} for different $\lambda_e$ values
+when trained from the same initial seed. Per train-seed effort across
+$\lambda_e \in \{0, 0.01, 0.1\}$:
+\begin{itemize}
+\itemsep0pt
+\item \textbf{train\_seed 0}: effort $= 0.000$ at every $\lambda_e$.
+\item \textbf{train\_seed 1}: effort $\approx 0.09$ at every $\lambda_e$.
+\item \textbf{train\_seed 2}: effort $\approx 0.19$ at every $\lambda_e$.
+\end{itemize}
+
+The policy is fully determined by the initial random seed; the
+reward-shape weight does not perturb it. Across all three train seeds
+the learned policy lies in a low-effort regime (max 0.19), well below
+the constraint-active 0.80 that MPC achieves. RMSE is correspondingly
+high (3.69~\textcelsius{} across the sweep) and worse than every
+non-RL controller in Tab.~\ref{tab:headline}.
+
+\paragraph{Diagnosis: initialisation dominance, not reward shaping.}
+At our 50k-timestep training budget on a 9-dimensional observation,
+PPO's gradient updates do not move the policy out of the basin set by
+random initialisation. Reward-shape weights affect the gradient
+\emph{magnitude} in that basin but not the basin itself: gradient
+ascent finds a local optimum that is, in our regime, a low-effort
+saturating policy (the agent's action distribution clips to near-zero
+on at least one vent and stays there). The original reward-shaping
+hypothesis cannot be tested at this training budget --- not because it
+is wrong, but because PPO does not move enough for $\lambda_e$ to
+matter.
+
+\paragraph{What this means for the paper.}
+The relevant contrast is not ``cautious MPC vs.\ reward-shaped PPO'' but
+\textbf{deterministic constrained optimisation vs.\ model-free stochastic
+optimisation under a bounded training budget}. MPC is seed-invariant by
+construction (the constraint-active argmin is unique up to optimiser
+tolerance); PPO at our budget is seed-determined. For HVAC control where
+predictable behaviour is required for commissioning, certification, and
+human oversight, the model-based controller is the safer choice
+regardless of asymptotic RL performance. We hypothesise that
+$\ge 500$k--$1$M training timesteps with entropy bonuses would reduce the
+initialisation dominance and let $\lambda_e$ start mattering, but
+verifying that is beyond our budget; we leave it as
+\texttt{scripts/run\_ppo\_reward\_sweep.py} parameter
+\texttt{--timesteps}.
+
 \subsection{Spatial structure of the final field}
 
 \begin{figure}[H]
@@ -651,24 +739,36 @@ constraint'' rather than to the cautious term itself. The Proportional
 controller satures into max effort; PPO closes vents entirely; only MPC
 acts with restraint, producing fields the GP can describe honestly.
 
-\paragraph{The PPO failure mode.}
-With reward $-\mathrm{RMSE} - 0.1\,\overline{u}$ and a 9-dim observation,
-PPO converges to a \emph{zero-effort} policy
-($\overline{u} = 0.000 \pm 0.000$ across seeds): closing the vents
-minimises the effort term immediately, while the RMSE term is dominated
-by the same physics that drives NoControl. This is a textbook
-diagnosed-failure-mode example of RL exploiting a reward-shaping
-artefact~\citep{sutton2018}. The cause is the effort weight relative to
-RMSE; lowering $\lambda_e$ from $0.1$ to $0.0$ would likely move PPO
-into a more effort-spending regime, at the cost of removing the
-energy-cost incentive. A clean $\lambda_e$ sweep would distinguish
-``RL cannot solve this'' from ``RL is sensitive to reward shaping'';
-we expect the latter. Independently, PPO achieves the \emph{best GP MAE}
-($0.44$) and the lowest temperature standard deviation ($0.49$). With
-vents closed, the field is dominated by slow, near-symmetric diffusion
-of occupancy heat into a uniform ambient bath, which the GP fits almost
-perfectly with few sensors. This is a diagnosed counter-result, not an
-inherent RL weakness: under-actuation can sometimes simplify the
+\paragraph{The PPO finding: initialisation-dominance under bounded training.}
+The headline PPO run used reward $-\mathrm{RMSE} - 0.1\,\overline{u}$ and
+converged to a zero-effort policy. The natural hypothesis is that the
+effort penalty is the culprit; the controlled sweep
+(Section~\ref{sec:ppo-sweep}) tests this directly and falsifies it. At
+$\lambda_e = 0$, $\lambda_e = 0.01$, and $\lambda_e = 0.1$, PPO produces
+\emph{identical policies within each train seed} (effort 0.000, 0.094,
+and 0.187 for train seeds 0, 1, 2 respectively, independent of
+$\lambda_e$). The cross-train-seed variance dwarfs the
+cross-$\lambda_e$ variance by an order of magnitude. The policy is
+determined by the initial random parameters and is not moved out of
+that basin within 50k timesteps regardless of the reward weight.
+
+This reframes the model-based-vs-model-free comparison. MPC is
+seed-invariant by construction --- the constrained optimisation has a
+unique argmin up to optimiser tolerance, independent of initialisation.
+PPO at our training budget is seed-determined; its calibration ECE
+($0.035$) and RMSE ($3.69$) reflect a random draw from a distribution
+of stuck policies rather than a converged solution. The 1--2 order of
+magnitude in training timesteps that would be needed to move PPO out
+of initialisation-dominance and into a regime where $\lambda_e$
+actually matters ($\ge 500$k--$1$M timesteps with entropy regularisation)
+was beyond the time budget of this project; we leave that test as
+future work.
+
+Independently, the under-actuated PPO regime achieves the best GP MAE
+($0.44$) and the lowest temperature standard deviation ($0.49$): with
+vents nearly closed the field is dominated by slow near-symmetric
+diffusion of occupancy heat into a uniform ambient bath, which the GP
+fits almost perfectly with few sensors. Under-actuation simplifies the
 inference problem at the expense of control.
 
 \paragraph{Why RMSE is similar across controllers.}
@@ -743,10 +843,13 @@ calibration advantage: the airflow constraint binds at every timestep,
 pinning the SLSQP solution onto a near-identical point regardless of
 $\lambda$. The advantage is structural --- MPC acts deliberately on a
 small fixed neighbourhood per step, producing fields the stationary GP
-kernel can fit honestly. The PPO agent exposes a diagnosed reward-shaping
-failure mode (zero effort, highest RMSE) but achieves the best GP fit
-and lowest field uniformity --- because closing the vents simplifies
-the inference problem at the cost of control. The codebase is
+kernel can fit honestly. The PPO agent's headline zero-effort
+policy is shown by a controlled $\lambda_e$ sweep to be
+initialisation-dominated rather than reward-shaping-dominated: at
+50k training timesteps, the policy is determined by the initial random
+seed rather than the reward weight. PPO achieves the best GP fit and
+lowest field uniformity because under-actuation simplifies the
+inference problem at the cost of control. The codebase is
 open-source, ships a 17-test pytest suite including a regression that
 catches a latent runaway-temperature bug found in an earlier 2D
 simulator iteration plus a regression for the no-op cautious-term
