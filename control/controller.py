@@ -71,18 +71,27 @@ class ProportionalCtrl:
 
 
 class MPCController:
-    """Model Predictive Control with a cautious uncertainty penalty.
+    """Model Predictive Control with an uncertainty-weighted tracking term.
 
     Each step we solve a single-step constrained optimisation:
 
-        J(u) = Q * mean((T_pred - T_sp)^2)
-             + lam * mean(std_field)        <- cautious term
-             + R * sum(u^2)                 <- effort penalty
+        J(u) = Q * mean( (T_pred - T_sp)^2 * (1 + lam * sigma_post) )
+             + R * sum(u^2)
 
     subject to 0 <= u_k <= 1 and sum(u_k) <= U_total.
 
-    T_pred is a one-step linearised forward prediction: each vent nudges
-    its 3x3x3 neighbourhood toward setpoint proportional to u_k.
+    The (1 + lam * sigma_post) weighting biases the optimiser toward acting
+    in voxels the GP is most uncertain about: when sigma_post is high, the
+    tracking error in that voxel costs more. When lam = 0 the term reduces
+    to a vanilla MPC. T_pred is a one-step linearised forward prediction:
+    each vent nudges its 3x3x3 neighbourhood toward setpoint proportional
+    to u_k.
+
+    Note: an earlier formulation used `lam * mean(sigma_post)` as a
+    standalone term, but `mean(sigma_post)` does not depend on u and so
+    the SLSQP argmin was independent of lam (verified via the
+    `scripts/run_lambda_ablation.py` ablation). The uncertainty-weighted
+    formulation above ensures lam materially shapes the action.
     """
     name = "MPC"
 
@@ -115,14 +124,18 @@ class MPCController:
                 slice(max(0, z - 1), min(nz, z + 2)),
             ))
 
+        # Uncertainty-weighted error mask. Computed once per MPC call
+        # (std_field is fixed within the timestep).
+        weights = 1.0 + self.lam * std_field
+
         def cost(u: np.ndarray) -> float:
             T_pred = mean_field.copy()
             for i, sl in enumerate(slices):
                 T_pred[sl] += u[i] * (sp - mean_field[sl]) * self._nudge
-            rmse_sq = float(np.mean((T_pred - sp) ** 2))
-            unc     = float(np.mean(std_field))
+            weighted_sq = ((T_pred - sp) ** 2) * weights
+            rmse_sq = float(np.mean(weighted_sq))
             effort  = float(np.sum(u ** 2))
-            return self.Q * rmse_sq + self.lam * unc + self.R * effort
+            return self.Q * rmse_sq + self.R * effort
 
         bounds = [(0.0, 1.0)] * n
         cons   = [{"type": "ineq", "fun": lambda u: U_total - float(np.sum(u))}]

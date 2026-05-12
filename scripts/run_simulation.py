@@ -83,22 +83,22 @@ def train_rl(args, out: Path):
     return model
 
 
-def eval_rl(model, args, seeds, store_fields_for_first: bool = False):
+def eval_rl(model, args, seeds, store_fields: bool = False):
     """Evaluate trained RL agent across seeds; same record schema as baselines.
 
-    If `store_fields_for_first`, save mean/std/truth histories of the seed-0
-    run for the calibration figure.
+    If `store_fields`, save mean/std/truth histories for every seed
+    so the calibration figure can pool across all seeds (rather than
+    base its reliability diagram on a single episode).
     """
     summaries = []
-    first_record = None
-    for i, seed in enumerate(seeds):
+    records: list[EpisodeRecord] = []
+    for seed in seeds:
         env = RoomEnv(nx=args.nx, ny=args.ny, nz=args.nz,
                       n_vents=args.n_vents, n_sensors=args.n_sensors,
                       setpoint=args.setpoint, episode_length=args.episode_len,
                       reward_lambda=args.lambda_effort, seed=seed)
         obs, _ = env.reset(seed=seed)
         record = EpisodeRecord()
-        store = (i == 0 and store_fields_for_first)
         for _ in range(args.episode_len):
             action, _ = model.predict(obs, deterministic=True)
             obs, reward, term, trunc, info = env.step(action)
@@ -107,41 +107,41 @@ def eval_rl(model, args, seeds, store_fields_for_first: bool = False):
             mean_field, std_field = env.gp.predict()
             truth = env.sim.ground_truth_field()
             record.record(mean_field, std_field, truth, action,
-                          args.setpoint, store_fields=store)
+                          args.setpoint, store_fields=store_fields)
             if term or trunc:
                 break
         summaries.append(record.summary())
-        if store:
-            first_record = record
+        if store_fields:
+            records.append(record)
 
     keys = summaries[0].keys()
     agg = {k: {"mean": float(np.mean([s[k] for s in summaries])),
                "std":  float(np.std([s[k] for s in summaries]))} for k in keys}
-    return agg, first_record
+    return agg, records
 
 
 # ----------------------------------------------------------------- baselines
 
 def run_baseline(ctrl_factory, name, make_sim_fn, gp_cls, seeds, args,
-                 store_fields_for_first: bool = False):
-    """Run a baseline controller across seeds, optionally storing fields."""
+                 store_fields: bool = False):
+    """Run a baseline controller across seeds, optionally storing field
+    histories for every seed so calibration can pool across all of them."""
     summaries = []
-    first_record = None
-    for i, seed in enumerate(seeds):
+    records: list = []
+    for seed in seeds:
         sim = make_sim_fn(seed)
         gp = gp_cls(nx=args.nx, ny=args.ny, nz=args.nz)
         controller = ctrl_factory(sim)
-        store = (i == 0 and store_fields_for_first)
         record = run_episode(sim, gp, controller, args.episode_len,
-                             store_fields=store)
+                             store_fields=store_fields)
         summaries.append(record.summary())
-        if store:
-            first_record = record
+        if store_fields:
+            records.append(record)
     keys = summaries[0].keys()
     agg = {k: {"mean": float(np.mean([s[k] for s in summaries])),
                "std":  float(np.std([s[k] for s in summaries]))} for k in keys}
     print(f"  {name}: done")
-    return agg, first_record
+    return agg, records
 
 
 # ---------------------------------------------------------------- reporting
@@ -222,25 +222,35 @@ def plot_cross_sections(record: EpisodeRecord, out: Path,
 
 
 def plot_calibration(records: dict, out: Path):
-    """Reliability diagram (empirical vs nominal coverage) for each condition."""
+    """Reliability diagram pooled across all seeds per controller.
+
+    `records`: dict mapping controller name to a list[EpisodeRecord] whose
+    mean/std/truth histories were stored. Empirical coverage is computed
+    by concatenating all (voxel, time) pairs across every stored episode.
+    """
     levels = np.linspace(0.50, 0.95, 10)
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.plot([0, 1], [0, 1], "--", color="gray", linewidth=1,
             label="perfect calibration (y=x)")
     colors = ["tab:blue", "tab:orange", "tab:green", "tab:red"]
-    for i, (name, rec) in enumerate(records.items()):
-        if rec is None or not rec.truth_history:
+    for i, (name, recs) in enumerate(records.items()):
+        if not recs:
             continue
-        cal = calibration_over_episode(rec.mean_history, rec.std_history,
-                                       rec.truth_history, nominal_levels=levels)
+        means  = [m for r in recs for m in r.mean_history]
+        stds   = [s for r in recs for s in r.std_history]
+        truths = [t for r in recs for t in r.truth_history]
+        if not truths:
+            continue
+        cal = calibration_over_episode(means, stds, truths, nominal_levels=levels)
+        n_seeds = len(recs)
         ax.plot(cal.nominal_levels, cal.empirical_coverage, "o-",
                 color=colors[i % len(colors)], linewidth=1.5,
-                label=f"{name} (ECE={cal.ECE:.3f})")
+                label=f"{name} (ECE={cal.ECE:.3f}, n={n_seeds} seeds)")
     ax.set_xlim(0.45, 1.0)
     ax.set_ylim(0.0, 1.02)
     ax.set_xlabel("Nominal coverage level alpha")
     ax.set_ylabel("Empirical coverage")
-    ax.set_title("Reliability diagram (per-condition seed-0 episode)")
+    ax.set_title("Reliability diagram (pooled across all seeds)")
     ax.legend(loc="lower right", fontsize=9)
     ax.grid(True, alpha=0.3)
     ax.set_aspect("equal")
@@ -265,25 +275,25 @@ def main():
     print(f"Episode length: {args.episode_len} steps | Seeds: {seeds}")
 
     print("\nRunning baselines...")
-    no_ctrl_results, no_ctrl_rec = run_baseline(
+    no_ctrl_results, no_ctrl_recs = run_baseline(
         lambda sim: NoControl(), "NoControl",
         lambda s: make_sim(s, args), GPField, seeds, args,
-        store_fields_for_first=True)
-    prop_results, prop_rec = run_baseline(
+        store_fields=True)
+    prop_results, prop_recs = run_baseline(
         lambda sim: ProportionalCtrl(), "Proportional",
         lambda s: make_sim(s, args), GPField, seeds, args,
-        store_fields_for_first=True)
-    mpc_results, mpc_rec = run_baseline(
+        store_fields=True)
+    mpc_results, mpc_recs = run_baseline(
         lambda sim: MPCController(lam=args.lambda_unc), "MPC",
         lambda s: make_sim(s, args), GPField, seeds, args,
-        store_fields_for_first=True)
+        store_fields=True)
 
     results = {"NoControl":    no_ctrl_results,
                "Proportional": prop_results,
                "MPC":          mpc_results}
-    records = {"NoControl":    no_ctrl_rec,
-               "Proportional": prop_rec,
-               "MPC":          mpc_rec}
+    records = {"NoControl":    no_ctrl_recs,
+               "Proportional": prop_recs,
+               "MPC":          mpc_recs}
 
     if not args.skip_rl:
         model_path = out / f"{args.algo}_agent.zip"
@@ -295,18 +305,19 @@ def main():
             model = train_rl(args, out)
 
         print("\nEvaluating RL agent...")
-        rl_results, rl_rec = eval_rl(model, args, seeds,
-                                      store_fields_for_first=True)
+        rl_results, rl_recs = eval_rl(model, args, seeds, store_fields=True)
         results[f"RL ({args.algo.upper()})"] = rl_results
-        records[f"RL ({args.algo.upper()})"] = rl_rec
+        records[f"RL ({args.algo.upper()})"] = rl_recs
         print("  RL: done")
 
     print_results_table(results)
     plot_comparison(results, out)
     plot_calibration(records, out)
-    for name, rec in records.items():
-        plot_cross_sections(rec, out, args.nx, args.ny, args.nz,
-                            args.setpoint, name)
+    # Cross-sections show the seed-0 final field per controller.
+    for name, recs in records.items():
+        if recs:
+            plot_cross_sections(recs[0], out, args.nx, args.ny, args.nz,
+                                args.setpoint, name)
 
     print(f"\nResults saved to {out.resolve()}")
 

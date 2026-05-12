@@ -7,21 +7,27 @@ Minnesota).
 
 ## Highlight result
 
-Across five seeds, four controllers cluster tightly on temperature RMSE
-($\le 0.1$ °C apart) and uniformity ($\le 0.08$ °C apart), but spread by
-$2.2\times$ on **calibration of the GP posterior credible intervals**.
+Across five seeds (pooled), four controllers cluster tightly on
+temperature RMSE ($\le 0.13$ °C apart) and uniformity ($\le 0.08$ °C
+apart), but spread by $2.1\times$ on **calibration of the GP posterior
+credible intervals**.
 
-| Controller | RMSE (°C) | Effort | 90% CI cov | **ECE** |
+| Controller | RMSE (°C) | Effort | 90% CI cov | **ECE (pooled)** |
 | --- | --- | --- | --- | --- |
-| NoControl     | 3.62 | 0.50 | 0.868 | 0.033 |
-| Proportional  | 3.58 | 1.00 | 0.928 | 0.023 |
-| **MPC (cautious)** | 3.59 | 0.80 | **0.900** | **0.015** |
-| PPO           | 3.69 | 0.07 | 0.864 | 0.033 |
+| NoControl     | 3.62 | 0.50 | 0.867 | 0.045 |
+| Proportional  | 3.58 | 1.00 | 0.929 | 0.031 |
+| **MPC (cautious)** | 3.59 | 0.80 | **0.898** | **0.021** |
+| PPO           | 3.70 | 0.00 | 0.863 | 0.035 |
 
-Cautious MPC tracks `y = x` on the reliability diagram within sampling
-noise at every level. The PPO agent converges to a near-zero-effort policy
-that exploits the effort-penalty term — an honest reward-shaping failure
-mode discussed in the paper.
+MPC tracks `y = x` on the reliability diagram most tightly across all
+nominal credible-interval levels. A $\lambda$-ablation
+(`scripts/run_lambda_ablation.py`) shows the MPC advantage comes from
+its constrained-optimisation structure rather than the uncertainty
+penalty term per se: the airflow constraint binds at every timestep,
+which pins the SLSQP solution onto the same point regardless of $\lambda$.
+The PPO agent converges to a zero-effort policy that exploits the
+effort-penalty term — a diagnosed reward-shaping failure mode discussed
+in the paper.
 
 ## Repo layout
 
