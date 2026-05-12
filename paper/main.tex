@@ -978,6 +978,22 @@ unreachable in 50~simulated minutes with this geometry; what differs
 between controllers is the \emph{path} to that quasi-equilibrium and
 how the GP perceives it.
 
+\paragraph{Findings versus literature.}
+We are not aware of prior work that reports reliability-diagram
+calibration of GP-based building thermal posteriors under closed-loop
+control: \citet{drgona2020}'s comprehensive survey of building MPC
+discusses uncertainty primarily in the context of weather and load
+forecasts, not in the context of credible-interval coverage of an
+embedded spatial inference layer; \citet{hewing2020} reports
+chance-constraint satisfaction (a related but distinct metric) for
+GP-MPC under additive process noise. Our MPC pooled ECE of $0.021$ on
+a sparse-sensing room (8 sensors over 400 voxels) is therefore a
+\emph{first quantitative datum} rather than an entry in a comparative
+table. Our sensor-count U-shape (Sec.~\ref{sec:sensors}) is, similarly,
+a finding that does not appear in the surveyed Kocijan/Hewing/Drgo\v{n}a
+literature, which treats sensor count as a fixed parameter of the
+deployment rather than a swept variable.
+
 \subsection{Limitations}
 
 \begin{itemize}
@@ -994,7 +1010,65 @@ how the GP perceives it.
       a longer horizon would require a learned dynamics surrogate.
 \item \textbf{Reward shaping for RL.} Only RMSE and effort are penalised;
       richer reward shaping (occupant-weighted comfort) is not explored.
+\item \textbf{Generalisation of the calibration ordering.} The MPC
+      calibration advantage is regime-dependent (Sec.~\ref{sec:sensors}):
+      it holds at our $S = 8$ but flips at $S = 4$ (Proportional wins)
+      and washes out at $S = 16$. The claim ``MPC produces honestly
+      calibrated GP credible intervals'' is therefore conditional on the
+      sensor-density regime, not a property of MPC alone.
+\item \textbf{Single weather realisation distribution.} The outdoor
+      boundary condition is a single sinusoidal-plus-noise model; no
+      January-vs-July study is performed.
 \end{itemize}
+
+\subsection{Societal impact and ethics}
+\label{sec:ethics}
+
+Building HVAC control intersects four areas of social impact that a
+deployment-grade version of this work would need to address explicitly.
+
+\paragraph{Comfort equity.} Optimising mean RMSE across voxels can
+mask large minorities of poorly-served cells. Our spatial framing
+exposes this in principle, but the reported metrics still emphasise
+the mean. A production deployment should report tail metrics (e.g.\
+95th-percentile cell deviation) alongside RMSE, and should treat
+occupied voxels with higher weight than unoccupied ones --- a basic
+fairness consideration when the controller's objective shapes whose
+discomfort is minimised.
+
+\paragraph{Energy use.} HVAC accounts for a substantial share of
+commercial-building energy. A miscalibrated controller that
+over-conditions hot pockets wastes energy at scale; the calibration
+metric we promote (ECE) directly diagnoses this failure mode. A
+controller that is honestly uncertain about a cell will not over-act
+on it. Our finding that the PPO agent converges to a near-zero-effort
+policy is, in this light, energy-frugal at the expense of comfort ---
+the right trade-off direction is a policy decision, not a technical
+one, and the controller's reward function should be transparent to
+that decision-maker.
+
+\paragraph{Sensor privacy.} Temperature sensors are usually classified
+as non-personally-identifying, but sensor \emph{density} is strongly
+correlated with occupancy density and movement patterns. Our
+sensor-count sensitivity study quantifies how few sensors suffice
+for honest calibration ($S = 8$ in our setup): this is useful for
+privacy-conscious deployments that want minimum-feasible
+instrumentation. Higher-density installations should be evaluated
+against the marginal calibration / control benefit, not assumed
+strictly better (Sec.~\ref{sec:sensors} shows it can be worse).
+
+\paragraph{Safety and reliability.} A confidently wrong controller is
+more dangerous than a humbly wrong one. ECE measures whether the
+controller's stated confidence is trustworthy, which matters for fault
+detection (sensor failures should manifest as inflated $\sigma_*$), for
+human oversight (an operator looking at the predicted field needs to
+trust the credible interval), and for certification (regulators
+increasingly require uncertainty quantification on automated decisions
+in safety-relevant settings). The model-based MPC controller's
+predictable, seed-invariant behaviour is a feature here, not a
+limitation: commissioning a deployed controller requires reproducible
+inputs $\to$ outputs, which the PPO agent's training-seed-dominated
+policy does not provide at our training budget.
 
 \subsection{Future Work}
 
@@ -1024,7 +1098,12 @@ across controllers --- calibration of the GP posterior credible intervals
 factor of $2.1\times$ better than the worst (NoControl, ECE $= 0.045$).
 Per-seed bootstrap CIs on the paired differences exclude zero for
 MPC vs.\ NoControl and MPC vs.\ Proportional
-(Section~\ref{sec:significance}).
+(Section~\ref{sec:significance}). A sensor-count sweep
+(Section~\ref{sec:sensors}) shows the MPC advantage is regime-dependent
+and that ECE is U-shaped in sensor density --- best at $S = 8$, worse
+at $S = 4$ and $S = 16$ --- a finding that motivates
+mutual-information-based sensor placement as the most direct future-work
+extension.
 On the secondary axis (control RMSE), all controllers cluster within
 $0.13$~\textcelsius{} of one another, dominated by the simulator's
 diffusion-only thermal transport and a setpoint above the outdoor-driven
