@@ -80,8 +80,25 @@ are wrong, the controller pours conditioned air toward the wrong cells
 and energy is wasted while comfort goals are missed~\citep{ashrae55}.
 
 This paper studies an agent that explicitly represents its uncertainty
-about the room's temperature field and acts cautiously under it. Three
-ideas combine:
+about the room's temperature field and acts cautiously under it.
+
+\paragraph{POMDP formulation.}
+Formally, the agent operates on a partially-observed Markov decision
+process (POMDP)~\citep{russell2020}: the state is the dense voxel
+temperature field $T \in \mathbb{R}^{n_x n_y n_z}$; the observation
+is a sparse noisy sensor reading $\mathbf{y} \in \mathbb{R}^S$ with
+$S \ll n_x n_y n_z$; the action is the vent damper vector
+$\mathbf{u} \in [0,1]^V$; transitions follow a stochastic 3D
+finite-difference diffusion plus boundary forcing
+(Section~\ref{sec:sim}); the reward is the negative tracking error
+plus an effort penalty. The GP regression in
+Section~\ref{sec:gp} plays the role of an approximate \emph{belief
+state} representation --- it summarises the agent's posterior over the
+hidden state given the observation history --- and the MPC inner loop
+plays the role of an approximate planner that acts on that belief
+state. The PPO agent is the alternative reactive policy that bypasses
+explicit belief representation entirely. Three ideas combine in the
+implementation:
 
 \begin{enumerate}
 \item A 3D voxel thermal simulator with stochastic physical parameters,
@@ -134,10 +151,33 @@ locations to maximise mutual information.
 \paragraph{Cautious MPC.}
 Standard MPC~\citep{camacho2007} optimises a deterministic trajectory.
 Stochastic and robust variants explicitly account for model
-uncertainty~\citep{guzman2018}. Our cautious term is a simple variant:
-penalise the mean of the GP posterior standard deviation, encouraging
-the controller to act in ways that drive uncertain regions toward the
-setpoint.
+uncertainty; the closest precedent to our setting is the
+GP-MPC formulation of~\citet{hewing2020}, which propagates a GP
+state-dynamics posterior through the MPC horizon and uses chance
+constraints to handle uncertainty. Our cautious term is a coarser
+formulation that does not propagate dynamics through the GP --- the
+GP describes the \emph{spatial} field at the current time rather than
+the temporal evolution --- so the comparison is one of analogy rather
+than direct extension.
+
+\paragraph{The gap.}
+GP regression for building thermal fields appears in~\citep{rasmussen2006}
+and successors, but typically with dense modelled-state observations or
+in 1D~\citep{kocijan2003}. Cautious MPC variants~\citep{hewing2020}
+treat additive process noise on a fully-observed state. Deep-RL HVAC
+studies~\citep{wei2017, drgona2020} typically run the agent on a learned
+high-dimensional representation of building state (e.g.\ from
+EnergyPlus) rather than on sparse physical sensors with explicit
+posterior uncertainty. The specific four-way combination we study ---
+(i) sparse 3D physical sensing, (ii) GP belief state, (iii) cautious
+MPC penalising GP posterior std, (iv) reliability-diagram calibration
+pooled over a full episode --- does not appear jointly in the surveyed
+literature. Our finding (MPC achieves pooled ECE $= 0.021$ vs.\
+$0.031$--$0.045$ for the alternatives, with bootstrap CIs supporting
+the ordering and a $\lambda$-ablation diagnosing why the cautious term
+is inactive in our regime) is, to our knowledge, the first
+quantification of how MPC structure shapes the calibration honesty of
+a GP-based building thermal posterior.
 
 \paragraph{Reinforcement learning for HVAC.}
 \citet{schulman2017} introduced proximal policy optimisation, the
@@ -201,6 +241,7 @@ ECE & expected calibration error, $\mathbb{E}_\alpha |\widehat{C}(\alpha) - \alp
 \end{table}
 
 \subsection{3D voxel thermal simulator}
+\label{sec:sim}
 
 The room is an $n_x \times n_y \times n_z$ voxel grid (default
 $10 \times 8 \times 5$ at $h = 0.5$~m, modelling a $5 \times 4 \times 2.5$~m
@@ -245,6 +286,7 @@ placed by a stratified scheme across $z$-levels (defaults: 8 sensors,
 4 ceiling vents).
 
 \subsection{Gaussian-process spatial inference}
+\label{sec:gp}
 
 We fit a GP with kernel
 \begin{equation}
@@ -366,14 +408,51 @@ RMSE between truth and setpoint; temperature standard deviation across
 voxels (uniformity); GP mean absolute error vs.\ truth; mean control
 effort $\overline{u}$; empirical 90\% CI coverage of the GP posterior.
 
-\textbf{Reproducibility}. The full pipeline runs in one command:
+\textbf{Reproducibility}. The full pipeline (baselines, PPO training,
+all figures) runs in one command:
 \begin{verbatim}
 python scripts/run_simulation.py --timesteps 100000 --seeds 0,1,2,3,4
 \end{verbatim}
-The repository ships a pytest suite (12 tests) covering shape sanity,
-seed reproducibility, the bug-fix regression for runaway temperatures,
-GP shape/fitting, controller validity, and 3D-shape compatibility of
-the calibration routine.
+Ablation and significance scripts are separate:
+\texttt{scripts/run\_lambda\_ablation.py},
+\texttt{scripts/run\_ppo\_reward\_sweep.py},
+\texttt{scripts/run\_significance.py}. The repository ships a 17-case
+\texttt{pytest} suite covering shape sanity, seed reproducibility, the
+bug-fix regression for runaway temperatures, GP shape/fitting,
+controller validity, the regression test for the no-op cautious-term
+formulation, and 3D-shape compatibility of the calibration routine.
+
+\paragraph{Hyperparameter justification.}
+Every numerical choice in this study is one of three categories:
+physically constrained, sourced from standards, or selected by sweep.
+Table~\ref{tab:hp} summarises.
+
+\begin{table}[H]
+\centering
+\caption{Hyperparameter choices and their justification.}
+\label{tab:hp}
+\small
+\begin{tabular}{lll}
+\toprule
+Parameter & Value & Rationale \\
+\midrule
+$h$ (voxel edge)       & $0.5$ m & Standard CFD resolution for room-scale heat; coarse enough to keep the GP query grid small. \\
+$\Delta t$             & $30$ s  & Constrained by CFL: $\alpha \Delta t/h^2 < 1/6$. With $\alpha_{\max}=10^{-3}$, $\Delta t \le 41.7$ s. \\
+$T_\mathrm{sp}$        & $22$~\textcelsius & ASHRAE Standard 55 comfort range mid-point. \\
+$T_\mathrm{init}$      & $15$~\textcelsius & A cold start that gives controllers a chance to differentiate from no-control. \\
+$\alpha$ range         & $U(3\!\times\!10^{-4}, 10^{-3})$ m$^2$/s & Effective turbulent diffusivity for stirred rooms; molecular air diffusivity ($\approx\!2\!\times\!10^{-5}$) would not move heat one voxel per episode. \\
+Occupancy heat         & $\mathcal{N}(75, 10^2)$ W & Standard sensible-heat load per occupant; ASHRAE Fundamentals. \\
+GP kernel              & RBF + WhiteKernel & Standard non-informative isotropic prior; hyperparameters fit by max marginal likelihood per call. \\
+$Q$, $R$ (MPC)         & $1, 0.05$ & Set so tracking dominates effort under typical $\overline{\sigma_*}$. \\
+$\lambda$ (MPC)        & $0.3$ & Headline choice; \emph{ablation} (Sec.~\ref{sec:lambda}) shows the value is irrelevant in our regime. \\
+$U_\mathrm{total}$     & $0.8 V$ & Airflow budget; chosen below the all-vents-open value ($V$) to make the constraint bind. \\
+$k_p$ (Proportional)   & $0.12$ & Tuned by hand for fastest stable rise; not swept (Proportional is not the headline). \\
+$\lambda_e$ (PPO)      & $0.1$ & Headline choice; \emph{sweep} (Sec.~\ref{sec:ppo-sweep}) shows it is dominated by initialisation. \\
+PPO timesteps          & $100$k headline, $50$k sweep & Compromise between training stability and time budget. \\
+Seeds                  & 5 (eval); 3 (PPO train) & Multi-seed for variance; bootstrap CIs on differences. \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \section{Results}
 
