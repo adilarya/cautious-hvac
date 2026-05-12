@@ -12,7 +12,9 @@
 \usepackage{algorithm}
 \usepackage{algpseudocode}
 
-\graphicspath{{../results/}}
+% Look in: local dir (Overleaf flat upload), results/ subdir (Overleaf nested),
+% and ../results/ (local CLI compile from paper/).
+\graphicspath{{./}{results/}{../results/}}
 \hypersetup{colorlinks=true, linkcolor=blue!50!black,
             citecolor=blue!50!black, urlcolor=blue!50!black}
 \bibliographystyle{plainnat}
